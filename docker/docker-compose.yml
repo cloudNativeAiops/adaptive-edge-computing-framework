@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  edge-node-1:
+    build:
+      context: .
+      dockerfile: edge-node/Dockerfile
+    container_name: edge-node-1
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - edge-net
+
+  edge-node-2:
+    build:
+      context: .
+      dockerfile: edge-node/Dockerfile
+    container_name: edge-node-2
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - edge-net
+
+networks:
+  edge-net:
+    driver: bridge 
