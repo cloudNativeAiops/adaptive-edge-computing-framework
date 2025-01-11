@@ -105,3 +105,34 @@ run-all: experiment-baseline experiment-adaptive experiment-resource experiment-
 ifeq ($(shell uname),Darwin)
     DOCKER_HOST ?= unix:///$(HOME)/.docker/run/docker.sock
 endif
+
+# Performance evaluation
+evaluate-performance: check-docker download-dataset
+	@echo "Running performance evaluation..."
+	DOCKER_HOST=$(DOCKER_HOST) PYTHONPATH=$(shell pwd) python experiments/evaluation/performance_evaluation.py
+	@echo "Results saved to results/evaluation/performance_metrics.json"
+
+# Show performance metrics
+show-metrics:
+	@echo "Current Performance Metrics:"
+	@if [ -f results/evaluation/performance_metrics.json ]; then \
+		python -c "import json; \
+		data = json.load(open('results/evaluation/performance_metrics.json')); \
+		print(f'\nModel: {data[\"model_name\"]}\n'); \
+		print('Accuracy:'); \
+		print(f'  Top-1: {data[\"accuracy\"][\"top1\"]:.2f}%'); \
+		print(f'  Top-5: {data[\"accuracy\"][\"top5\"]:.2f}%\n'); \
+		print('Latency:'); \
+		print(f'  Average: {data[\"latency\"][\"average_ms\"]:.2f}ms'); \
+		print(f'  P95: {data[\"latency\"][\"p95_ms\"]:.2f}ms')"; \
+	else \
+		echo "No metrics found. Run 'make evaluate-performance' first."; \
+	fi
+
+# Download test dataset
+download-dataset:
+	@echo "Creating test dataset directory..."
+	mkdir -p data/test_dataset
+	@echo "Downloading test dataset..."
+	python -c "from src.utils.accuracy_evaluator import AccuracyEvaluator; AccuracyEvaluator()"
+	@echo "Dataset preparation complete! ✅"

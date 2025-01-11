@@ -13,6 +13,10 @@ class InferenceMetrics:
     model_name: str
     batch_size: int
     device: str
+    accuracy: float = 0.0          # Top-1 accuracy
+    top5_accuracy: float = 0.0     # Top-5 accuracy
+    predictions: List[int] = None  # predicted results
+    ground_truth: List[int] = None # ground truth
 
 class MetricsCollector:
     def __init__(self, output_dir: str = "results"):
