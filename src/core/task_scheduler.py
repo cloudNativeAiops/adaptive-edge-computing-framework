@@ -2,6 +2,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 import numpy as np
+import time
 
 @dataclass
 class TaskRequirements:
@@ -24,6 +25,7 @@ class AdaptiveScheduler:
         self.nodes: Dict[str, NodeResources] = {}
         self.task_history: Dict[str, List[float]] = {}  # node_id -> execution times
         self.node_task_count: Dict[str, int] = {}  # Track number of tasks per node
+        self.performance_history = {}
         
     def register_node(self, node_id: str, resources: NodeResources):
         """Register a new edge node with its resources."""
@@ -119,3 +121,48 @@ class AdaptiveScheduler:
                     'current_load': self.nodes[node_id].current_load
                 }
         return stats 
+
+    def schedule_tasks(self, tasks, available_nodes):
+        start_time = time.time()
+        
+        # 记录初始状态
+        initial_queue_lengths = self._get_queue_lengths(available_nodes)
+        
+        # 执行任务分配
+        distribution = {}
+        for task in tasks:
+            best_node = self._find_best_node(task, available_nodes)
+            distribution[best_node] = distribution.get(best_node, 0) + 1
+            
+        # 计算负载均衡得分
+        load_balance_score = self._calculate_load_balance(distribution)
+        
+        # 测量调度开销
+        scheduling_overhead = (time.time() - start_time) * 1000  # 转换为毫秒
+        
+        return {
+            "load_balancing_score": load_balance_score,
+            "scheduling_overhead": scheduling_overhead,
+            "task_distribution": distribution,
+            "queue_lengths": self._get_queue_lengths(available_nodes)
+        }
+        
+    def _calculate_load_balance(self, distribution):
+        """计算负载均衡得分 (0-1)"""
+        if not distribution:
+            return 0
+        values = list(distribution.values())
+        return 1 - (max(values) - min(values)) / sum(values) 
+
+    def _get_queue_lengths(self, available_nodes):
+        """获取节点队列长度"""
+        queue_lengths = {}
+        for node_id in available_nodes:
+            queue_lengths[node_id] = len(self.performance_history.get(node_id, []))
+        return queue_lengths
+
+# 在类定义之后创建别名
+TaskScheduler = AdaptiveScheduler
+
+# 更新导出列表
+__all__ = ['NodeResources', 'TaskRequirements', 'TaskScheduler'] 
