@@ -38,10 +38,18 @@ class AdaptiveScheduler:
         self.nodes[node_id] = resources
         
     def select_node(self, task: TaskRequirements) -> Optional[str]:
-        """Select best node for task based on resources and load balancing."""
-        candidate_nodes = []
-        
+        """动态选择最优节点"""
         for node_id, resources in self.nodes.items():
+            # 考虑实时负载
+            current_load = self.get_node_load(node_id)
+            if current_load > 0.8:  # 负载过高
+                continue
+            
+            # 考虑网络延迟
+            network_latency = self.measure_network_latency(node_id)
+            if network_latency > self.latency_threshold:
+                continue
+            
             # Check if node has enough resources
             if (resources.cpu_available >= task.cpu_needed and 
                 resources.memory_available >= task.memory_needed):

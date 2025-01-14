@@ -1,321 +1,432 @@
 import docker
-import logging
-from typing import Optional
+import platform
+import os
 import time
+import subprocess
+from pathlib import Path
 
 class DockerManager:
     _instance = None
-    _containers = {}  # 类级别的容器映射
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DockerManager, cls).__new__(cls)
-            cls._instance.client = docker.from_env()
-            cls._instance.logger = logging.getLogger(__name__)
+            try:
+                # 检查 Docker 守护进程是否运行
+                if not cls._is_docker_running():
+                    raise RuntimeError("Docker daemon is not running")
+                
+                # 尝试多种连接方式
+                connection_methods = [
+                    # 1. 环境变量方式
+                    lambda: docker.from_env(),
+                    # 2. Docker Desktop 默认路径 (macOS)
+                    lambda: docker.DockerClient(base_url='unix:///Users/guilinzhang/.docker/run/docker.sock'),
+                    # 3. 标准 Unix socket 路径
+                    lambda: docker.DockerClient(base_url='unix:///var/run/docker.sock'),
+                    # 4. TCP 连接 (如果配置了)
+                    lambda: docker.DockerClient(base_url='tcp://localhost:2375'),
+                ]
+                
+                last_error = None
+                for connect_method in connection_methods:
+                    try:
+                        cls._instance.client = connect_method()
+                        # 验证连接
+                        cls._instance.client.ping()
+                        print("Successfully connected to Docker daemon")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        continue
+                else:
+                    raise RuntimeError(f"Failed to connect to Docker after trying all methods: {last_error}")
+                
+                # 初始化必要的属性
+                cls._instance._containers = {}
+                cls._instance._networks = {}
+                cls._instance._images = {}
+                cls._instance._cluster_config = {
+                    'node_count': 3,
+                    'base_image': 'python:3.10-slim',
+                    'network_name': 'edge_network',
+                    'container_prefix': 'edge_node_',
+                    'startup_timeout': 30,
+                    'health_check_interval': 1
+                }
+                
+            except Exception as e:
+                print(f"\nDetailed Docker connection error:")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                cls._print_docker_debug_info()
+                raise
+                
         return cls._instance
     
-    def __init__(self):
-        # 确保不重复初始化
-        pass
-        
-    def get_container(self, node_id: str):
-        """获取指定节点ID的容器"""
-        if node_id in self._containers:  # 使用类变量
-            try:
-                return self.client.containers.get(self._containers[node_id])
-            except docker.errors.NotFound:
-                del self._containers[node_id]  # 使用类变量
-                raise ValueError(f"Container for node {node_id} not found or was removed")
-        raise ValueError(f"Container for node {node_id} not found")
+    @staticmethod
+    def _is_docker_running():
+        """检查 Docker 守护进程是否运行"""
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
     
-    def create_edge_node(self, name: str, cpu_limit: float = 0.5, memory_limit: str = "512m") -> str:
-        """创建一个模拟边缘设备的Docker容器"""
-        try:
-            # 确保清理同名容器
-            self.cleanup(name)
-            
-            print(f"Creating container {name}...")
-            
-            # 只使用 cpu_period/cpu_quota 方式限制 CPU
-            container = self.client.containers.run(
-                "python:3.10-slim",
-                name=name,
-                detach=True,
-                cpu_period=100000,  # 微秒
-                cpu_quota=int(cpu_limit * 100000),  # 转换为配额
-                mem_limit=memory_limit,
-                command="tail -f /dev/null"
-            )
-            
-            # 验证资源限制是否生效
-            inspect_data = self.client.api.inspect_container(container.id)
-            host_config = inspect_data['HostConfig']
-            print(f"Container {name} resource limits:")
-            print(f"CPU Period: {host_config.get('CpuPeriod', 'N/A')}")
-            print(f"CPU Quota: {host_config.get('CpuQuota', 'N/A')}")
-            print(f"Memory: {host_config.get('Memory', 0)/1024/1024:.0f}MB")
-            
-            # 使用类变量存储容器ID
-            self._containers[name] = container.id
-            print(f"Stored container {name} with ID {container.id} in containers map")
-            print(f"Current containers map: {self._containers}")
-            
-            # 安装依赖
-            self._install_dependencies(container)
-            
-            # 添加CPU负载测试
-            print(f"Adding CPU load test to container {name}...")
-            cpu_load_command = (
-                "python -c '"
-                "import time; "
-                "def cpu_load(): "
-                "    while True: "
-                "        x = 0; "
-                "        for i in range(1000000): x += i; "
-                "cpu_load()' &"  # 在后台运行
-            )
-            container.exec_run(cpu_load_command, detach=True)
-            
-            # 等待一段时间让CPU负载生效
-            time.sleep(2)
-            
-            print(f"Container {name} created successfully with ID: {container.id}")
-            return container.id
-            
-        except Exception as e:
-            print(f"Error creating edge device simulator: {e}")
-            raise
-            
-    def create_edge_cluster(self):
-        """Create edge device cluster with better error handling"""
-        nodes = {
-            "node1": {"cpu": 0.2, "memory": "256m"},
-            "node2": {"cpu": 0.5, "memory": "512m"},
-            "node3": {"cpu": 1.0, "memory": "1g"}
-        }
+    @staticmethod
+    def _print_docker_debug_info():
+        """打印 Docker 调试信息"""
+        print("\nDocker Debug Information:")
         
-        # First ensure no existing containers
-        self.cleanup()
-        
-        created_containers = {}
-        try:
-            for name, resources in nodes.items():
-                container_id = self.create_edge_node(
-                    name=name,
-                    cpu_limit=resources["cpu"],
-                    memory_limit=resources["memory"]
-                )
-                created_containers[name] = container_id
-                
-                # 给容器一些时间来启动和安装依赖
-                time.sleep(2)
-                
-                # Wait for container to be ready before proceeding
-                if not self._wait_for_container_ready(name):
-                    raise Exception(f"Container {name} failed to become ready")
-                    
-            print("All containers in cluster are ready!")
-            return created_containers
-            
-        except Exception as e:
-            print(f"Error creating cluster: {e}")
-            # Only cleanup containers that were created in this attempt
-            for name in created_containers:
-                self.cleanup(name)
-            raise
-            
-    def _wait_for_container_ready(self, node_id: str, timeout: int = 180, max_retries: int = 5):
-        """Wait for container to be ready with better error handling and retries"""
-        print(f"Waiting for container {node_id} to be ready...")
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                container = self.get_container(node_id)
-                if container.status == "running":
-                    # 首先检查基本的Python环境
-                    exit_code, output = container.exec_run(
-                        "python -c 'print(\"Basic Python check\")'",
-                    )
-                    
-                    if exit_code == 0:
-                        print(f"Container {node_id} basic check passed")
-                        
-                        # 然后检查依赖项
-                        exit_code, output = container.exec_run(
-                            "python -c 'import numpy; import torch; print(\"Dependencies check passed\")'"
-                        )
-                        
-                        if exit_code == 0:
-                            print(f"Container {node_id} is fully ready!")
-                            return True
-                        else:
-                            print(f"Dependencies not yet ready in {node_id}, retrying...")
-                            print(f"Output: {output.decode()}")  # 添加更多诊断信息
-                    
-                    print(f"Container {node_id} not ready, attempt {retry_count + 1}/{max_retries}")
-                    time.sleep(5)  # 增加等待时间，给依赖安装更多时间
-                    retry_count += 1
-                    
-                else:
-                    print(f"Container {node_id} status: {container.status}")
-                    time.sleep(5)
-                    retry_count += 1
-                    
-            except Exception as e:
-                print(f"Error checking container {node_id} readiness: {e}")
-                # 添加容器状态诊断
-                try:
-                    container = self.get_container(node_id)
-                    print(f"Container status: {container.status}")
-                    print(f"Container logs:")
-                    print(container.logs().decode())
-                except Exception as inner_e:
-                    print(f"Failed to get container diagnostics: {inner_e}")
-                
-                time.sleep(5)
-                retry_count += 1
-        
-        print(f"Container {node_id} failed to become ready after {max_retries} attempts")
-        return False
-
-    def _install_dependencies(self, container):
-        """安装容器所需的依赖"""
-        print("Installing minimal dependencies for edge device simulation...")
-        
-        # 首先更新 pip
-        try:
-            print("Updating pip...")
-            result = container.exec_run(
-                "python -m pip install --upgrade pip",
-                stream=False
-            )
-            if result.exit_code != 0:
-                print("Warning: Failed to update pip")
-        except Exception as e:
-            print(f"Warning: Failed to update pip: {e}")
-        
-        # 系统更新和安装必要工具
-        system_commands = [
-            "apt-get clean",
-            "rm -rf /var/lib/apt/lists/*",
-            "apt-get update -y",  # 移除重定向
-            "apt-get install -y build-essential"  # 移除重定向
+        # 检查常见的 socket 路径
+        socket_paths = [
+            "/var/run/docker.sock",
+            os.path.expanduser("~/.docker/run/docker.sock"),
+            os.path.expanduser("~/Library/Containers/com.docker.docker/Data/docker.sock")
         ]
         
+        print("\nChecking Docker socket paths:")
+        for path in socket_paths:
+            exists = os.path.exists(path)
+            readable = os.access(path, os.R_OK) if exists else False
+            writable = os.access(path, os.W_OK) if exists else False
+            print(f"Path: {path}")
+            print(f"  Exists: {exists}")
+            print(f"  Readable: {readable}")
+            print(f"  Writable: {writable}")
+            if exists:
+                try:
+                    stats = os.stat(path)
+                    print(f"  Permissions: {oct(stats.st_mode)}")
+                    print(f"  Owner: {stats.st_uid}")
+                except Exception as e:
+                    print(f"  Error getting stats: {e}")
+        
+        # 检查 Docker 环境变量
+        print("\nDocker Environment Variables:")
+        for var in ['DOCKER_HOST', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY']:
+            print(f"{var}: {os.environ.get(var, 'Not set')}")
+        
+        # 检查 Docker 版本和信息
         try:
-            for cmd in system_commands:
-                print(f"Executing: {cmd}")
-                result = container.exec_run(
-                    cmd,
-                    stream=False,  # 使用 stream=False 来减少输出
-                    environment={
-                        "DEBIAN_FRONTEND": "noninteractive",
-                        "PYTHONUNBUFFERED": "1"
-                    }
-                )
-                if result.exit_code != 0:
-                    print(f"Command failed with exit code {result.exit_code}")
-                    print(f"Output: {result.output.decode()}")
-                    raise Exception(f"Failed to execute: {cmd}")
-            
-            # Python 依赖安装
-            dependencies = [
-                ("numpy<2.0", "pip install --no-cache-dir --quiet 'numpy<2.0'"),
-                ("torch and torchvision", 
-                 "pip install --no-cache-dir --quiet torch==2.1.2+cpu torchvision==0.16.2+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html"),
-                ("pillow", "pip install --no-cache-dir --quiet pillow")
-            ]
-            
-            for dep_name, cmd in dependencies:
-                print(f"Installing {dep_name}...")
-                result = container.exec_run(
-                    cmd,
-                    stream=False,
-                    environment={"PYTHONUNBUFFERED": "1"}
-                )
-                if result.exit_code != 0:
-                    print(f"Failed to install {dep_name}")
-                    print(f"Output: {result.output.decode()}")
-                    raise Exception(f"Failed to install {dep_name}")
-            
-            # 验证安装
-            print("Verifying installations...")
-            verification_command = (
-                "python -c '"
-                "import numpy; print(f\"numpy {numpy.__version__}\"); "
-                "import torch; print(f\"torch {torch.__version__}\"); "
-                "import torchvision; print(f\"torchvision {torchvision.__version__}\"); "
-                "import PIL; print(f\"pillow {PIL.__version__}\"); "
-                "'"
+            version_result = subprocess.run(
+                ["docker", "version"],
+                capture_output=True,
+                text=True
             )
-            result = container.exec_run(verification_command, stream=False)
-            print(result.output.decode())
+            print("\nDocker Version:")
+            print(version_result.stdout)
+        except Exception as e:
+            print(f"Failed to get Docker version: {e}")
+        
+        try:
+            info_result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True
+            )
+            print("\nDocker Info:")
+            print(info_result.stdout)
+        except Exception as e:
+            print(f"Failed to get Docker info: {e}") 
+
+    def create_edge_cluster(self, node_count=3):
+        """创建边缘计算集群"""
+        try:
+            print(f"Creating edge cluster with {node_count} nodes...")
             
-            if result.exit_code != 0:
-                raise Exception("Dependencies verification failed")
-                
-            print("All dependencies installed and verified successfully!")
+            self._cleanup_existing_resources()
+            
+            # 创建网络
+            network_name = self._cluster_config['network_name']
+            try:
+                network = self.client.networks.create(
+                    network_name,
+                    driver="bridge",
+                    check_duplicate=True
+                )
+                self._networks[network_name] = network
+                print(f"Created network: {network_name}")
+            except docker.errors.APIError as e:
+                if 'already exists' in str(e):
+                    network = self.client.networks.get(network_name)
+                    self._networks[network_name] = network
+                    print(f"Using existing network: {network_name}")
+                else:
+                    raise
+
+            # 创建容器
+            for i in range(node_count):
+                node_id = f"{self._cluster_config['container_prefix']}{i+1}"
+                try:
+                    # 检查并删除同名容器
+                    try:
+                        existing_container = self.client.containers.get(node_id)
+                        existing_container.remove(force=True)
+                        print(f"Removed existing container: {node_id}")
+                    except docker.errors.NotFound:
+                        pass
+
+                    # 创建新容器，使用更小的依赖包
+                    container = self.client.containers.run(
+                        self._cluster_config['base_image'],
+                        name=node_id,
+                        command="tail -f /dev/null",
+                        detach=True,
+                        network=network_name,
+                        remove=True,
+                        environment={
+                            "PYTHONUNBUFFERED": "1",
+                            "NODE_ID": node_id,
+                            "PATH": "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                        },
+                        volumes={
+                            '/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}
+                        },
+                        working_dir="/app",
+                        tty=True,
+                        stdin_open=True
+                    )
+                    
+                    # 分步安装依赖，使用 CPU-only 版本减小体积
+                    setup_commands = [
+                        "apt-get update",
+                        "apt-get install -y --no-install-recommends python3-pip",
+                        "rm -rf /var/lib/apt/lists/*",  # 分开执行清理命令
+                        "apt-get clean",
+                        "pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu"
+                    ]
+                    
+                    for cmd in setup_commands:
+                        print(f"Executing: {cmd}")
+                        # 使用 /bin/sh -c 来执行命令
+                        exit_code, output = container.exec_run(
+                            cmd,
+                            environment={"DEBIAN_FRONTEND": "noninteractive"},
+                            user="root",  # 确保使用 root 用户执行命令
+                            workdir="/",  # 在根目录执行命令
+                            privileged=True  # 给予必要的权限
+                        )
+                        if exit_code != 0:
+                            print(f"Command output: {output.decode()}")
+                            raise RuntimeError(f"Container setup failed: {cmd}")
+                        print(f"Successfully executed: {cmd}")
+                    
+                    self._containers[node_id] = container
+                    print(f"Created container: {node_id}")
+                    
+                    if not self._wait_for_container_ready(node_id):
+                        raise RuntimeError(f"Container {node_id} failed to start")
+                    
+                except Exception as e:
+                    print(f"Error creating container {node_id}: {e}")
+                    self._cleanup_cluster()
+                    raise
+
+            return self._containers
             
         except Exception as e:
-            print(f"Error during dependency installation: {e}")
+            print(f"Error creating edge cluster: {e}")
+            self._cleanup_cluster()
             raise
-    
-    def cleanup(self, container_name: Optional[str] = None):
-        """清理Docker容器"""
+
+    def _cleanup_existing_resources(self):
+        """清理已存在的资源"""
+        try:
+            # 获取所有容器
+            containers = self.client.containers.list(all=True)
+            for container in containers:
+                if container.name.startswith(self._cluster_config['container_prefix']):
+                    try:
+                        container.remove(force=True)
+                        print(f"Removed existing container: {container.name}")
+                    except Exception as e:
+                        print(f"Error removing container {container.name}: {e}")
+
+            # 获取所有网络
+            networks = self.client.networks.list()
+            for network in networks:
+                if network.name == self._cluster_config['network_name']:
+                    try:
+                        network.remove()
+                        print(f"Removed existing network: {network.name}")
+                    except Exception as e:
+                        print(f"Error removing network {network.name}: {e}")
+                        
+            # 清理内部状态
+            self._containers = {}
+            self._networks = {}
+            
+        except Exception as e:
+            print(f"Error during cleanup of existing resources: {e}")
+            raise
+
+    def cleanup(self, container_name=None):
+        """
+        清理资源
+        Args:
+            container_name: 可选，指定要清理的容器名称。如果为None，清理所有资源
+        """
         try:
             if container_name:
                 # 清理指定容器
-                try:
-                    container = self.client.containers.get(container_name)
-                    container.remove(force=True)
-                    print(f"Removed container: {container_name}")
-                except docker.errors.NotFound:
-                    print(f"Container {container_name} not found")
-            else:
-                # 清理所有相关容器
-                containers = self.client.containers.list(
-                    all=True,
-                    filters={"name": "node"}  # 修改过滤器以匹配我们的容器名称
-                )
-                for container in containers:
+                if container_name in self._containers:
                     try:
+                        container = self._containers[container_name]
+                        container.stop()
                         container.remove(force=True)
-                        print(f"Removed container: {container.name}")
+                        del self._containers[container_name]
+                        print(f"Removed container: {container_name}")
                     except Exception as e:
-                        print(f"Error removing container {container.name}: {e}")
-                    
+                        print(f"Error removing container {container_name}: {e}")
+            else:
+                # 清理所有资源
+                self._cleanup_cluster()
         except Exception as e:
             print(f"Error during cleanup: {e}")
-            raise
-    
-    def get_project_root(self) -> str:
-        """获取项目根目录"""
-        import os
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
-    
-    def get_container_stats(self, container_id):
-        """获取容器详细资源使用统计"""
+
+    def get_container_metrics(self, container_id):
+        """获取容器的资源使用指标"""
         try:
-            container = self.client.containers.get(container_id)
+            # 初始化默认值
+            cpu_usage = 0.0
+            memory_usage = 0.0
+            
+            # 获取容器对象
+            container = self._containers.get(container_id)
+            if not container:
+                print(f"Container {container_id} not found in managed containers")
+                return {
+                    'cpu_usage_percent': cpu_usage,
+                    'memory_usage_mb': memory_usage
+                }
+
+            # 获取容器统计信息
             stats = container.stats(stream=False)
             
-            # CPU使用率
-            cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
-                       stats['precpu_stats']['cpu_usage']['total_usage']
-            system_delta = stats['cpu_stats']['system_cpu_usage'] - \
-                          stats['precpu_stats']['system_cpu_usage']
-            cpu_percent = (cpu_delta / system_delta) * 100.0
-            
-            # 内存使用率
-            memory_usage = stats['memory_stats']['usage']
-            memory_limit = stats['memory_stats']['limit']
-            memory_percent = (memory_usage / memory_limit) * 100.0
-            
+            # 计算 CPU 使用率
+            if all(key in stats for key in ['cpu_stats', 'precpu_stats']):
+                cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
+                           stats['precpu_stats']['cpu_usage']['total_usage']
+                system_delta = stats['cpu_stats']['system_cpu_usage'] - \
+                              stats['precpu_stats']['system_cpu_usage']
+                if system_delta > 0:
+                    cpu_usage = (cpu_delta / system_delta) * 100.0
+
+            # 计算内存使用量（MB）
+            if 'memory_stats' in stats:
+                memory_usage = stats['memory_stats'].get('usage', 0) / (1024 * 1024)
+
             return {
-                'cpu_percent': round(cpu_percent, 2),
-                'memory_percent': round(memory_percent, 2)
+                'cpu_usage_percent': cpu_usage,
+                'memory_usage_mb': memory_usage
             }
+            
         except Exception as e:
-            print(f"Error getting container stats: {e}")
-            return {'cpu_percent': 0, 'memory_percent': 0} 
+            print(f"Error getting metrics for container {container_id}: {e}")
+            return {
+                'cpu_usage_percent': 0.0,
+                'memory_usage_mb': 0.0
+            }
+
+    def get_container_status(self, container_id):
+        """获取容器状态"""
+        container = self._containers.get(container_id)
+        if not container:
+            return None
+        container.reload()  # 刷新容器状态
+        return container.status
+
+    def _wait_for_container_ready(self, node_id, max_retries=30):
+        """等待容器准备就绪"""
+        retries = 0
+        while retries < max_retries:
+            try:
+                container = self.client.containers.get(node_id)
+                container.reload()  # 刷新容器状态
+                status = container.status
+                print(f"Container {node_id} status: {status}")
+                
+                if status == 'running':
+                    # 执行简单的健康检查
+                    try:
+                        exit_code, output = container.exec_run(
+                            'python3 -c "print(\'container ready\')"',
+                            stderr=True
+                        )
+                        if exit_code == 0:
+                            print(f"Container {node_id} is ready")
+                            return True
+                    except Exception as e:
+                        print(f"Health check failed: {e}")
+                
+                elif status in ['exited', 'dead']:
+                    print(f"Container {node_id} failed with status: {status}")
+                    # 获取容器日志以帮助诊断
+                    logs = container.logs().decode('utf-8')
+                    print(f"Container logs:\n{logs}")
+                    return False
+                
+                time.sleep(self._cluster_config['health_check_interval'])
+                retries += 1
+                
+            except docker.errors.NotFound:
+                print(f"Container {node_id} not found")
+                return False
+            except Exception as e:
+                print(f"Error checking container status: {e}")
+                return False
+                
+        print(f"Timeout waiting for container {node_id}")
+        return False
+
+    def _cleanup_cluster(self):
+        """清理所有集群资源"""
+        try:
+            # 停止并删除所有容器
+            for container_id, container in list(self._containers.items()):
+                try:
+                    container.stop()
+                    container.remove(force=True)
+                    print(f"Removed container: {container_id}")
+                except Exception as e:
+                    print(f"Error removing container {container_id}: {e}")
+                finally:
+                    self._containers.pop(container_id, None)
+
+            # 删除所有网络
+            for network_name, network in list(self._networks.items()):
+                try:
+                    network.remove()
+                    print(f"Removed network: {network_name}")
+                except Exception as e:
+                    print(f"Error removing network {network_name}: {e}")
+                finally:
+                    self._networks.pop(network_name, None)
+            
+        except Exception as e:
+            print(f"Error during cluster cleanup: {e}")
+        finally:
+            # 确保状态被清理
+            self._containers = {}
+            self._networks = {}
+
+    def get_container(self, node_id):
+        """获取指定节点的容器"""
+        if node_id not in self._containers:
+            raise KeyError(f"Container {node_id} not found")
+        return self._containers[node_id]
+
+    def get_all_containers(self):
+        """获取所有容器"""
+        return self._containers
+
+    def get_container_stats(self, node_id):
+        """获取容器的资源使用统计"""
+        container = self.get_container(node_id)
+        return container.stats(stream=False) 

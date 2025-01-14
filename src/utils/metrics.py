@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.docker_manager import DockerManager
 import json
 import traceback
+import subprocess
 
 @dataclass
 class InferenceMetrics:
@@ -56,8 +57,17 @@ class MetricsCollector:
         return cls._instance
     
     def __init__(self):
-        # 确保不重复初始化
-        pass
+        try:
+            self.docker_manager = DockerManager()
+            print("Successfully initialized Docker manager")
+        except Exception as e:
+            print(f"Failed to initialize Docker manager: {e}")
+            print("Docker debug info:")
+            try:
+                subprocess.run(['docker', 'info'], check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"Docker info command failed: {e}")
+            raise
         
     def collect_comprehensive_metrics(self):
         """收集综合性能指标"""
@@ -106,7 +116,7 @@ class MetricsCollector:
         self.resource_history.clear()
         
     def collect_resource_metrics(self, containers):
-        """改进的 CPU 使用率计算"""
+        """改进的 CPU 和内存使用率计算"""
         if not containers:
             return {}
             
@@ -115,6 +125,8 @@ class MetricsCollector:
         
         for node_id, container_id in containers.items():
             cpu_usages = []
+            memory_usage = 0.0  # 初始化内存使用变量
+            
             for _ in range(samples):
                 try:
                     container = self.docker_manager.client.containers.get(container_id)
@@ -141,8 +153,8 @@ class MetricsCollector:
                     print(f"\nRaw CPU Usage for {node_id}: {cpu_usage}%")
                     
                     # 内存使用计算
-                    memory_stats = stats_2['memory_stats']
-                    memory_usage = memory_stats['usage'] / (1024 * 1024)  # 转换为 MB
+                    if 'memory_stats' in stats_2:
+                        memory_usage = stats_2['memory_stats'].get('usage', 0) / (1024 * 1024)  # 转换为 MB
                     
                     cpu_usages.append(cpu_usage)
                     time.sleep(1.0)  # 每次采样间隔1秒
@@ -150,13 +162,17 @@ class MetricsCollector:
                 except Exception as e:
                     print(f"Error collecting metrics for {node_id}: {e}")
                     cpu_usages.append(0.0)
-                    
-            avg_cpu_usage = sum(cpu_usages) / len(cpu_usages)
+                    continue
+            
+            # 计算平均 CPU 使用率
+            avg_cpu_usage = sum(cpu_usages) / len(cpu_usages) if cpu_usages else 0.0
+            
+            # 存储该节点的指标
             resource_metrics[node_id] = {
                 'cpu_usage_percent': avg_cpu_usage,
                 'memory_usage_mb': memory_usage
             }
-            
+        
         return resource_metrics
 
     def collect_system_metrics(self):

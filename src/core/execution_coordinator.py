@@ -30,9 +30,22 @@ class DistributedExecutor:
             tasks.append(task)
         
         # 3. 并行等待所有任务完成
-        results = await asyncio.gather(*[
-            asyncio.wrap_future(task) for task in tasks
-        ])
+        try:
+            results = await asyncio.gather(*[
+                asyncio.wrap_future(task) for task in tasks
+            ], return_exceptions=True)
+            
+            # 如果某个节点失败，可以重新调度到其他节点
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    backup_result = await self._retry_on_different_node(
+                        tasks[i], 
+                        exclude_nodes=[nodes[i]]
+                    )
+                    results[i] = backup_result
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            raise
         
         return self._aggregate_results(results)
         
