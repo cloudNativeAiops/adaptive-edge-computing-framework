@@ -124,27 +124,20 @@ class AdaptiveScheduler:
 
     def schedule_tasks(self, tasks, available_nodes):
         start_time = time.time()
-        
-        # 记录初始状态
-        initial_queue_lengths = self._get_queue_lengths(available_nodes)
-        
-        # 执行任务分配
         distribution = {}
-        for task in tasks:
-            best_node = self._find_best_node(task, available_nodes)
-            distribution[best_node] = distribution.get(best_node, 0) + 1
-            
-        # 计算负载均衡得分
-        load_balance_score = self._calculate_load_balance(distribution)
         
-        # 测量调度开销
-        scheduling_overhead = (time.time() - start_time) * 1000  # 转换为毫秒
+        for task in tasks:
+            node = self._select_best_node(task)
+            distribution[node] = distribution.get(node, 0) + 1
+            self.task_history[node].append(time.time())
+        
+        end_time = time.time()
         
         return {
-            "load_balancing_score": load_balance_score,
-            "scheduling_overhead": scheduling_overhead,
-            "task_distribution": distribution,
-            "queue_lengths": self._get_queue_lengths(available_nodes)
+            'load_balancing_score': self._calculate_load_balance(distribution),
+            'scheduling_overhead': (end_time - start_time) * 1000,  # ms
+            'task_distribution': distribution,
+            'queue_lengths': [len(history) for history in self.task_history.values()]
         }
         
     def _calculate_load_balance(self, distribution):

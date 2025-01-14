@@ -1,4 +1,4 @@
-.PHONY: setup test clean docker-build docker-up docker-down experiment-baseline experiment-adaptive init
+.PHONY: setup test clean docker-build docker-up docker-down experiment-baseline experiment-adaptive init show-metrics evaluate-and-show
 
 # Initial setup
 init:
@@ -114,12 +114,8 @@ evaluate-performance: check-docker download-dataset
 
 # Show performance metrics
 show-metrics:
-	@echo "Performance Evaluation Results:"
-	@if [ -f results/evaluation/performance_metrics.json ]; then \
-		PYTHONPATH=$(shell pwd) python src/utils/show_metrics.py; \
-	else \
-		echo "No metrics found. Run 'make evaluate-performance' first."; \
-	fi
+	@echo "Showing performance metrics..."
+	@PYTHONPATH=$(PWD) python -m src.utils.show_metrics
 
 # Download test dataset
 download-dataset:
@@ -133,3 +129,7 @@ download-dataset:
 evaluate-parallel: check-docker download-dataset
 	@echo "Running parallel performance evaluation..."
 	DOCKER_HOST=$(DOCKER_HOST) PYTHONPATH=$(shell pwd) python experiments/run_parallel_evaluation.py
+
+# Add a new target to evaluate and show
+evaluate-and-show: evaluate-performance show-metrics
+	@echo "Evaluation and metrics display complete!"

@@ -36,31 +36,24 @@ class DockerManager:
             
             print(f"Creating container {name}...")
             
+            # 只使用 cpu_period/cpu_quota 方式限制 CPU
             container = self.client.containers.run(
                 "python:3.10-slim",
                 name=name,
-                command="tail -f /dev/null",
                 detach=True,
-                cpu_period=100000,
-                cpu_quota=int(cpu_limit * 100000),
+                cpu_period=100000,  # 微秒
+                cpu_quota=int(cpu_limit * 100000),  # 转换为配额
                 mem_limit=memory_limit,
-                shm_size="2g",
-                volumes={
-                    str(self.get_project_root()): {
-                        'bind': '/app',
-                        'mode': 'rw'
-                    }
-                },
-                working_dir="/app",
-                environment={
-                    "PYTHONPATH": "/app",
-                    "PYTHONUNBUFFERED": "1",
-                    "CUDA_VISIBLE_DEVICES": "",
-                    "NO_CUDA": "1",
-                    "OMP_NUM_THREADS": "1",
-                    "MKL_NUM_THREADS": "1"
-                }
+                command="tail -f /dev/null"
             )
+            
+            # 验证资源限制是否生效
+            inspect_data = self.client.api.inspect_container(container.id)
+            host_config = inspect_data['HostConfig']
+            print(f"Container {name} resource limits:")
+            print(f"CPU Period: {host_config.get('CpuPeriod', 'N/A')}")
+            print(f"CPU Quota: {host_config.get('CpuQuota', 'N/A')}")
+            print(f"Memory: {host_config.get('Memory', 0)/1024/1024:.0f}MB")
             
             # 使用类变量存储容器ID
             self._containers[name] = container.id
@@ -69,6 +62,22 @@ class DockerManager:
             
             # 安装依赖
             self._install_dependencies(container)
+            
+            # 添加CPU负载测试
+            print(f"Adding CPU load test to container {name}...")
+            cpu_load_command = (
+                "python -c '"
+                "import time; "
+                "def cpu_load(): "
+                "    while True: "
+                "        x = 0; "
+                "        for i in range(1000000): x += i; "
+                "cpu_load()' &"  # 在后台运行
+            )
+            container.exec_run(cpu_load_command, detach=True)
+            
+            # 等待一段时间让CPU负载生效
+            time.sleep(2)
             
             print(f"Container {name} created successfully with ID: {container.id}")
             return container.id
@@ -284,3 +293,29 @@ class DockerManager:
         """获取项目根目录"""
         import os
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+    
+    def get_container_stats(self, container_id):
+        """获取容器详细资源使用统计"""
+        try:
+            container = self.client.containers.get(container_id)
+            stats = container.stats(stream=False)
+            
+            # CPU使用率
+            cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
+                       stats['precpu_stats']['cpu_usage']['total_usage']
+            system_delta = stats['cpu_stats']['system_cpu_usage'] - \
+                          stats['precpu_stats']['system_cpu_usage']
+            cpu_percent = (cpu_delta / system_delta) * 100.0
+            
+            # 内存使用率
+            memory_usage = stats['memory_stats']['usage']
+            memory_limit = stats['memory_stats']['limit']
+            memory_percent = (memory_usage / memory_limit) * 100.0
+            
+            return {
+                'cpu_percent': round(cpu_percent, 2),
+                'memory_percent': round(memory_percent, 2)
+            }
+        except Exception as e:
+            print(f"Error getting container stats: {e}")
+            return {'cpu_percent': 0, 'memory_percent': 0} 

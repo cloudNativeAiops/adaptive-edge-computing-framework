@@ -94,17 +94,23 @@ class DistributedExecutor:
         """在容器中运行推理"""
         try:
             # 准备输入数据
-            input_shape = tuple(input_data["input_shape"])  # 转换为元组
+            input_shape = tuple(input_data["input_shape"])
             
-            # 构建推理命令
+            # 添加实际的计算负载
             inference_command = (
                 f"python -c '"
                 f"import torch; "
                 f"import json; "
-                f"input_tensor = torch.randn({input_shape}); "  # 使用元组形式的shape
+                f"import time; "
+                f"input_tensor = torch.randn({input_shape}); "
+                f"# 增加计算量 "
+                f"for _ in range(10000): "  # 增加到10000次
+                f"    result = torch.nn.functional.relu(input_tensor); "
+                f"    result = torch.matmul(result, result.t());"  # 添加矩阵乘法
+                f"    input_tensor = result; "
                 f"print(json.dumps({{"
                 f"    \"partition_id\": \"{partition}\", "
-                f"    \"input_shape\": {list(input_shape)}, "  # 转回列表以便JSON序列化
+                f"    \"input_shape\": {list(input_shape)}, "
                 f"    \"output\": \"simulation_output\""
                 f"}}))"
                 f"'"

@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from src.core.task_scheduler import NodeResources
+import time
 
 class ModelPartitioner:
     def __init__(self, model: nn.Module):
@@ -145,3 +146,50 @@ class ResourceAwarePartitioner(ModelPartitioner):
                         load = partition_loads[node_id]
                         
         return optimized
+
+    def _record_partition_metrics(self, partitions):
+        """记录分区性能指标"""
+        metrics = {
+            'partition_sizes': [],
+            'communication_costs': 0,
+            'partition_latencies': [],
+            'total_transfer': 0
+        }
+        
+        for node_id, layers in partitions.items():
+            # 计算分区大小
+            size = sum(self._get_layer_size(layer) for layer in layers)
+            metrics['partition_sizes'].append(size)
+            
+            # 估算通信成本
+            if node_id != list(partitions.keys())[0]:  # 不是第一个分区
+                input_size = self._estimate_intermediate_size(layers[0])
+                metrics['communication_costs'] += input_size
+                metrics['total_transfer'] += input_size
+                
+        return metrics
+
+    def optimize_partitions(self, partitions, performance_history):
+        """优化分区策略"""
+        optimized = {}
+        total_communication_cost = 0
+        
+        for node_id, layers in partitions.items():
+            # 计算当前分区的通信成本
+            comm_cost = self._calculate_communication_cost(layers)
+            total_communication_cost += comm_cost
+            
+            # 基于历史性能调整分区
+            if node_id in performance_history:
+                avg_latency = np.mean(performance_history[node_id])
+                if avg_latency > self.latency_threshold:
+                    # 减少分区大小
+                    layers = self._reduce_partition_size(layers)
+            
+            optimized[node_id] = layers
+        
+        return optimized, {
+            'total_communication_cost': total_communication_cost,
+            'partition_sizes': [len(layers) for layers in optimized.values()],
+            'optimization_overhead': time.time() - start_time
+        }
