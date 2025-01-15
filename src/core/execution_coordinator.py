@@ -15,10 +15,19 @@ class DistributedExecutor:
         self.docker_manager = DockerManager()
         
     async def execute_parallel(self, input_data, available_nodes):
-        # 1. 获取分区方案
-        partitions = self.partitioner.partition_for_cluster(available_nodes)
+        # 1. partition the model
+        partitions = self.partitioner.partition(
+            model=self.model,
+            available_nodes=available_nodes
+        )
         
-        # 2. 创建每个节点的任务
+        # 2. schedule tasks
+        schedule = self.scheduler.schedule_tasks(
+            tasks=partitions,
+            available_nodes=available_nodes
+        )
+        
+        # 2. create tasks for each node
         tasks = []
         for node_id, partition in partitions.items():
             task = self.executor.submit(
@@ -29,13 +38,13 @@ class DistributedExecutor:
             )
             tasks.append(task)
         
-        # 3. 并行等待所有任务完成
+        # 3. parallel wait for all tasks to complete
         try:
             results = await asyncio.gather(*[
                 asyncio.wrap_future(task) for task in tasks
             ], return_exceptions=True)
             
-            # 如果某个节点失败，可以重新调度到其他节点
+            # if a node fails, it can be rescheduled to other nodes
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     backup_result = await self._retry_on_different_node(
@@ -50,7 +59,7 @@ class DistributedExecutor:
         return self._aggregate_results(results)
         
     def _execute_partition(self, node_id, partition, input_data):
-        """在单个节点上执行分区"""
+        """execute a partition on a single node"""
         retries = 3
         for attempt in range(retries):
             try:
@@ -59,31 +68,31 @@ class DistributedExecutor:
             except ValueError as e:
                 if "not found" in str(e) and attempt < retries - 1:
                     print(f"Container {node_id} not found, retrying... Attempt: {attempt+1}/{retries}")
-                    time.sleep(5)  # 增加重试延迟
+                    time.sleep(5)  # increase retry delay
                 else:
                     print(f"Failed to get container {node_id} after multiple retries.")
-                    if node_id == "node3": # 针对 node3 增加日志
+                    if node_id == "node3": # for node3, add more logs
                         try:
-                            # 获取并打印容器的详细状态
+                            # get and print the detailed status of the container
                             container = self.docker_manager.client.containers.get(self.docker_manager.containers[node_id])
                             print(f"Container {node_id} status: {container.attrs['State']}")
 
-                            # 执行并打印 docker ps -a
+                            # execute and print docker ps -a
                             print("--- docker ps -a ---")
                             process = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True)
                             print(process.stdout)
 
-                            # 执行并打印 docker inspect node3
+                            # execute and print docker inspect node3
                             print(f"--- docker inspect {node_id} ---")
                             process = subprocess.run(["docker", "inspect", self.docker_manager.containers[node_id]], capture_output=True, text=True)
                             print(process.stdout)
 
-                            # 打印 docker events (需要根据实际情况调整时间)
-                            print(f"--- docker events --since '{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time() - 600))}' ---") # 打印过去 10 分钟的事件
+                            # print docker events (need to adjust the time according to the actual situation)
+                            print(f"--- docker events --since '{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time() - 600))}' ---") # print the events of the last 10 minutes
                             process = subprocess.run(["docker", "events", "--since", time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time() - 600))], capture_output=True, text=True)
                             print(process.stdout)
 
-                            # 执行并打印 docker logs node3
+                            # execute and print docker logs node3
                             print(f"--- docker logs {node_id} ---")
                             process = subprocess.run(["docker", "logs", self.docker_manager.containers[node_id]], capture_output=True, text=True)
                             print(process.stdout)
@@ -104,22 +113,22 @@ class DistributedExecutor:
                 raise
         
     def _run_inference(self, container, partition, input_data):
-        """在容器中运行推理"""
+        """run inference in the container"""
         try:
-            # 准备输入数据
+            # prepare input data
             input_shape = tuple(input_data["input_shape"])
             
-            # 添加实际的计算负载
+            # add actual computation load
             inference_command = (
                 f"python -c '"
                 f"import torch; "
                 f"import json; "
                 f"import time; "
                 f"input_tensor = torch.randn({input_shape}); "
-                f"# 增加计算量 "
-                f"for _ in range(10000): "  # 增加到10000次
+                f"# add computation load "
+                f"for _ in range(10000): "  # increase to 10000 times
                 f"    result = torch.nn.functional.relu(input_tensor); "
-                f"    result = torch.matmul(result, result.t());"  # 添加矩阵乘法
+                f"    result = torch.matmul(result, result.t());"  # add matrix multiplication
                 f"    input_tensor = result; "
                 f"print(json.dumps({{"
                 f"    \"partition_id\": \"{partition}\", "
@@ -129,7 +138,7 @@ class DistributedExecutor:
                 f"'"
             )
             
-            # 执行推理
+            # execute inference
             exit_code, output = container.exec_run(
                 inference_command,
                 environment={"PYTHONPATH": "/app"}
@@ -138,7 +147,7 @@ class DistributedExecutor:
             if exit_code != 0:
                 raise Exception(f"Inference failed with exit code {exit_code}: {output.decode()}")
                 
-            # 解析输出结果
+            # parse the output result
             try:
                 result = json.loads(output.decode().strip())
                 return {"status": "success", "result": result}
@@ -150,8 +159,8 @@ class DistributedExecutor:
             return {"status": "error", "message": str(e)}
             
     def _aggregate_results(self, results):
-        """聚合所有分区的结果"""
-        # TODO: 实现结果聚合逻辑
+        """aggregate the results of all partitions"""
+        # TODO: implement the result aggregation logic
         return {
             "aggregated_results": results,
             "status": "success"

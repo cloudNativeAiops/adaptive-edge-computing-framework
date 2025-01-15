@@ -77,10 +77,10 @@ class AdaptiveScheduler:
                 # Final score with adjusted weights
                 # Give more weight to balance_score and less to resource_score
                 total_score = (
-                    0.2 * resource_score +    # Reduced from 0.3
+                    0.2 * resource_score +    
                     0.2 * load_score +
-                    0.1 * perf_score +        # Reduced from 0.2
-                    0.5 * balance_score       # Increased from 0.3
+                    0.1 * perf_score +        
+                    0.5 * balance_score       
                 )
                 
                 # Add small random factor to break ties (0-5% of total score)

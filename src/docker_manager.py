@@ -12,19 +12,19 @@ class DockerManager:
         if cls._instance is None:
             cls._instance = super(DockerManager, cls).__new__(cls)
             try:
-                # 检查 Docker 守护进程是否运行
+                # check if the Docker daemon is running
                 if not cls._is_docker_running():
                     raise RuntimeError("Docker daemon is not running")
                 
-                # 尝试多种连接方式
+                # try multiple connection methods
                 connection_methods = [
-                    # 1. 环境变量方式
+                    # 1. environment variable method
                     lambda: docker.from_env(),
-                    # 2. Docker Desktop 默认路径 (macOS)
+                    # 2. default path of Docker Desktop (macOS)
                     lambda: docker.DockerClient(base_url='unix:///Users/guilinzhang/.docker/run/docker.sock'),
-                    # 3. 标准 Unix socket 路径
+                    # 3. standard Unix socket path
                     lambda: docker.DockerClient(base_url='unix:///var/run/docker.sock'),
-                    # 4. TCP 连接 (如果配置了)
+                    # 4. TCP connection (if configured)
                     lambda: docker.DockerClient(base_url='tcp://localhost:2375'),
                 ]
                 
@@ -32,7 +32,7 @@ class DockerManager:
                 for connect_method in connection_methods:
                     try:
                         cls._instance.client = connect_method()
-                        # 验证连接
+                        # verify the connection
                         cls._instance.client.ping()
                         print("Successfully connected to Docker daemon")
                         break
@@ -42,7 +42,7 @@ class DockerManager:
                 else:
                     raise RuntimeError(f"Failed to connect to Docker after trying all methods: {last_error}")
                 
-                # 初始化必要的属性
+                # initialize necessary attributes
                 cls._instance._containers = {}
                 cls._instance._networks = {}
                 cls._instance._images = {}
@@ -66,7 +66,7 @@ class DockerManager:
     
     @staticmethod
     def _is_docker_running():
-        """检查 Docker 守护进程是否运行"""
+        """check if the Docker daemon is running"""
         try:
             result = subprocess.run(
                 ["docker", "info"],
@@ -80,10 +80,10 @@ class DockerManager:
     
     @staticmethod
     def _print_docker_debug_info():
-        """打印 Docker 调试信息"""
+        """print Docker debug information"""
         print("\nDocker Debug Information:")
         
-        # 检查常见的 socket 路径
+        # check common socket paths
         socket_paths = [
             "/var/run/docker.sock",
             os.path.expanduser("~/.docker/run/docker.sock"),
@@ -107,12 +107,12 @@ class DockerManager:
                 except Exception as e:
                     print(f"  Error getting stats: {e}")
         
-        # 检查 Docker 环境变量
+        # check Docker environment variables
         print("\nDocker Environment Variables:")
         for var in ['DOCKER_HOST', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY']:
             print(f"{var}: {os.environ.get(var, 'Not set')}")
         
-        # 检查 Docker 版本和信息
+        # check Docker version and information
         try:
             version_result = subprocess.run(
                 ["docker", "version"],
@@ -135,14 +135,31 @@ class DockerManager:
         except Exception as e:
             print(f"Failed to get Docker info: {e}") 
 
+    def __init__(self):
+        # define different resource configuration profiles
+        self.resource_profiles = {
+            'high': {
+                'cpu_limit': 1.0,    # 1 core
+                'memory_limit': '1g'  # 1GB
+            },
+            'medium': {
+                'cpu_limit': 0.6,    # 0.6 core
+                'memory_limit': '512m'  # 512MB
+            },
+            'low': {
+                'cpu_limit': 0.4,    # 0.4 core
+                'memory_limit': '512m'  # 512MB
+            }
+        }
+
     def create_edge_cluster(self, node_count=3):
-        """创建边缘计算集群"""
+        """dynamically create edge computing clusters"""
         try:
             print(f"Creating edge cluster with {node_count} nodes...")
             
             self._cleanup_existing_resources()
             
-            # 创建网络
+            # create network
             network_name = self._cluster_config['network_name']
             try:
                 network = self.client.networks.create(
@@ -160,11 +177,23 @@ class DockerManager:
                 else:
                     raise
 
-            # 创建容器
+            # assign resource configurations based on the number of nodes
+            resource_assignments = []
+            if node_count == 3:
+                resource_assignments = ['high', 'medium', 'low']
+            elif node_count == 4:
+                resource_assignments = ['high', 'high', 'medium', 'low']
+            elif node_count == 2:
+                resource_assignments = ['high', 'medium']
+            
+            # create containers
             for i in range(node_count):
                 node_id = f"{self._cluster_config['container_prefix']}{i+1}"
+                profile = resource_assignments[i]
+                resource_config = self.resource_profiles[profile]
+                
                 try:
-                    # 检查并删除同名容器
+                    # check and remove existing containers with the same name
                     try:
                         existing_container = self.client.containers.get(node_id)
                         existing_container.remove(force=True)
@@ -172,7 +201,7 @@ class DockerManager:
                     except docker.errors.NotFound:
                         pass
 
-                    # 创建新容器，使用更小的依赖包
+                    # create new container, add resource constraints
                     container = self.client.containers.run(
                         self._cluster_config['base_image'],
                         name=node_id,
@@ -190,27 +219,31 @@ class DockerManager:
                         },
                         working_dir="/app",
                         tty=True,
-                        stdin_open=True
+                        stdin_open=True,
+                        # add resource constraints
+                        cpu_period=100000,
+                        cpu_quota=int(100000 * resource_config['cpu_limit']),
+                        mem_limit=resource_config['memory_limit']
                     )
                     
-                    # 分步安装依赖，使用 CPU-only 版本减小体积
+                    # step by step install dependencies, use CPU-only version to reduce volume
                     setup_commands = [
                         "apt-get update",
                         "apt-get install -y --no-install-recommends python3-pip",
-                        "rm -rf /var/lib/apt/lists/*",  # 分开执行清理命令
+                        "rm -rf /var/lib/apt/lists/*",  # execute cleanup commands separately
                         "apt-get clean",
                         "pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu"
                     ]
                     
                     for cmd in setup_commands:
                         print(f"Executing: {cmd}")
-                        # 使用 /bin/sh -c 来执行命令
+                        # use /bin/sh -c to execute commands
                         exit_code, output = container.exec_run(
                             cmd,
                             environment={"DEBIAN_FRONTEND": "noninteractive"},
-                            user="root",  # 确保使用 root 用户执行命令
-                            workdir="/",  # 在根目录执行命令
-                            privileged=True  # 给予必要的权限
+                            user="root",  # ensure using root user to execute commands
+                            workdir="/",  # execute commands in the root directory
+                            privileged=True  # give necessary permissions
                         )
                         if exit_code != 0:
                             print(f"Command output: {output.decode()}")
@@ -236,9 +269,9 @@ class DockerManager:
             raise
 
     def _cleanup_existing_resources(self):
-        """清理已存在的资源"""
+        """clean up existing resources"""
         try:
-            # 获取所有容器
+            # get all containers
             containers = self.client.containers.list(all=True)
             for container in containers:
                 if container.name.startswith(self._cluster_config['container_prefix']):
@@ -248,7 +281,7 @@ class DockerManager:
                     except Exception as e:
                         print(f"Error removing container {container.name}: {e}")
 
-            # 获取所有网络
+            # get all networks
             networks = self.client.networks.list()
             for network in networks:
                 if network.name == self._cluster_config['network_name']:
@@ -258,7 +291,7 @@ class DockerManager:
                     except Exception as e:
                         print(f"Error removing network {network.name}: {e}")
                         
-            # 清理内部状态
+            # clean up internal state
             self._containers = {}
             self._networks = {}
             
@@ -268,13 +301,13 @@ class DockerManager:
 
     def cleanup(self, container_name=None):
         """
-        清理资源
+        clean up resources
         Args:
-            container_name: 可选，指定要清理的容器名称。如果为None，清理所有资源
+            container_name: optional, specify the container name to clean up. If None, clean up all resources
         """
         try:
             if container_name:
-                # 清理指定容器
+                # clean up the specified container
                 if container_name in self._containers:
                     try:
                         container = self._containers[container_name]
@@ -285,19 +318,19 @@ class DockerManager:
                     except Exception as e:
                         print(f"Error removing container {container_name}: {e}")
             else:
-                # 清理所有资源
+                # clean up all resources
                 self._cleanup_cluster()
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
     def get_container_metrics(self, container_id):
-        """获取容器的资源使用指标"""
+        """get the resource usage metrics of the container"""
         try:
-            # 初始化默认值
+            # initialize default values
             cpu_usage = 0.0
             memory_usage = 0.0
             
-            # 获取容器对象
+            # get the container object
             container = self._containers.get(container_id)
             if not container:
                 print(f"Container {container_id} not found in managed containers")
@@ -306,10 +339,10 @@ class DockerManager:
                     'memory_usage_mb': memory_usage
                 }
 
-            # 获取容器统计信息
+            # get the container statistics
             stats = container.stats(stream=False)
             
-            # 计算 CPU 使用率
+            # calculate CPU usage rate
             if all(key in stats for key in ['cpu_stats', 'precpu_stats']):
                 cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
                            stats['precpu_stats']['cpu_usage']['total_usage']
@@ -318,7 +351,7 @@ class DockerManager:
                 if system_delta > 0:
                     cpu_usage = (cpu_delta / system_delta) * 100.0
 
-            # 计算内存使用量（MB）
+            # calculate memory usage (MB)
             if 'memory_stats' in stats:
                 memory_usage = stats['memory_stats'].get('usage', 0) / (1024 * 1024)
 
@@ -335,25 +368,25 @@ class DockerManager:
             }
 
     def get_container_status(self, container_id):
-        """获取容器状态"""
+        """get the container status"""
         container = self._containers.get(container_id)
         if not container:
             return None
-        container.reload()  # 刷新容器状态
+        container.reload()  # refresh the container status
         return container.status
 
     def _wait_for_container_ready(self, node_id, max_retries=30):
-        """等待容器准备就绪"""
+        """wait for the container to be ready"""
         retries = 0
         while retries < max_retries:
             try:
                 container = self.client.containers.get(node_id)
-                container.reload()  # 刷新容器状态
+                container.reload()  # refresh the container status
                 status = container.status
                 print(f"Container {node_id} status: {status}")
                 
                 if status == 'running':
-                    # 执行简单的健康检查
+                    # execute a simple health check
                     try:
                         exit_code, output = container.exec_run(
                             'python3 -c "print(\'container ready\')"',
@@ -367,7 +400,7 @@ class DockerManager:
                 
                 elif status in ['exited', 'dead']:
                     print(f"Container {node_id} failed with status: {status}")
-                    # 获取容器日志以帮助诊断
+                    # get the container logs to help diagnose
                     logs = container.logs().decode('utf-8')
                     print(f"Container logs:\n{logs}")
                     return False
@@ -386,9 +419,9 @@ class DockerManager:
         return False
 
     def _cleanup_cluster(self):
-        """清理所有集群资源"""
+        """clean up all cluster resources"""
         try:
-            # 停止并删除所有容器
+            # stop and delete all containers
             for container_id, container in list(self._containers.items()):
                 try:
                     container.stop()
@@ -399,7 +432,7 @@ class DockerManager:
                 finally:
                     self._containers.pop(container_id, None)
 
-            # 删除所有网络
+            # delete all networks
             for network_name, network in list(self._networks.items()):
                 try:
                     network.remove()
@@ -412,21 +445,21 @@ class DockerManager:
         except Exception as e:
             print(f"Error during cluster cleanup: {e}")
         finally:
-            # 确保状态被清理
+            # ensure the state is cleaned up
             self._containers = {}
             self._networks = {}
 
     def get_container(self, node_id):
-        """获取指定节点的容器"""
+        """get the container of the specified node"""
         if node_id not in self._containers:
             raise KeyError(f"Container {node_id} not found")
         return self._containers[node_id]
 
     def get_all_containers(self):
-        """获取所有容器"""
+        """get all containers"""
         return self._containers
 
     def get_container_stats(self, node_id):
-        """获取容器的资源使用统计"""
+        """get the resource usage statistics of the container"""
         container = self.get_container(node_id)
         return container.stats(stream=False) 
