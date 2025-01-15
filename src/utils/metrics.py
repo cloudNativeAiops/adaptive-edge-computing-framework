@@ -123,15 +123,15 @@ class MetricsCollector:
         samples = 3  # 采样次数
         resource_metrics = {}
         
-        for node_id, container_id in containers.items():
+        for node_id, container in containers.items():
             cpu_usages = []
             memory_usage = 0.0  # 初始化内存使用变量
             
             for _ in range(samples):
                 try:
-                    container = self.docker_manager.client.containers.get(container_id)
+                    # 直接使用容器对象，而不是尝试获取
                     stats_1 = container.stats(stream=False)
-                    time.sleep(1.0)  # 增加到1秒
+                    time.sleep(1.0)
                     stats_2 = container.stats(stream=False)
                     
                     # CPU 使用率计算
@@ -149,15 +149,11 @@ class MetricsCollector:
                     else:
                         cpu_usage = 0.0
                         
-                    # 保留原始值，不进行四舍五入
-                    print(f"\nRaw CPU Usage for {node_id}: {cpu_usage}%")
-                    
                     # 内存使用计算
                     if 'memory_stats' in stats_2:
                         memory_usage = stats_2['memory_stats'].get('usage', 0) / (1024 * 1024)  # 转换为 MB
                     
                     cpu_usages.append(cpu_usage)
-                    time.sleep(1.0)  # 每次采样间隔1秒
                     
                 except Exception as e:
                     print(f"Error collecting metrics for {node_id}: {e}")
