@@ -1,6 +1,6 @@
-# Adaptive Edge Computing Framework
+# Adaptive Model Partitioning Framework (AMP4EC)
 
-A framework for deploying and evaluating deep learning models on edge devices.
+A framework for adaptive model partitioning and distributed inference on edge devices.
 
 ## Features
 
@@ -88,7 +88,7 @@ The framework evaluates model performance under different configurations:
   Latency reduction: 77.17%
   Throughput improvement: 422.32%
   Scheduling overhead: 10.00ms
-  ```README.md
+  ```
 
 #### 3. Scale-down Configuration (2 nodes)
 - Baseline: 1 core, 1GB memory

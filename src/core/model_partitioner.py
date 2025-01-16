@@ -7,7 +7,7 @@ import time
 
 class ModelPartitioner:
     def __init__(self, model: nn.Module):
-        """Initialize the model partitioner."""
+        """Initialize the AMP4EC model partitioner."""
         self.model = model
 
 class ResourceAwarePartitioner(ModelPartitioner):
